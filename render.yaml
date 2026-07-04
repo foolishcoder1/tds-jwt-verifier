@@ -1,5 +1,5 @@
 # Render.com deployment configuration
-# This tells Render how to run our FastAPI service
+# This tells Render how to build and run our FastAPI service
 
 services:
   - type: web
@@ -8,3 +8,10 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     plan: free
+    envVars:
+      # Layer 4: OS-level environment variables (APP_* prefix)
+      # These simulate what the assignment calls "OS env vars"
+      - key: APP_PORT
+        value: "8593"
+      - key: APP_WORKERS
+        value: "6"
