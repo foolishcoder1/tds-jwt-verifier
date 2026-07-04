@@ -29,8 +29,32 @@ from dotenv import dotenv_values   # pip install python-dotenv — reads .env fi
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from typing import List, Optional
+import jwt                          # PyJWT — for Q2 JWT verification
+from jwt import PyJWTError
 import uvicorn
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q2 — JWT VERIFICATION CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2okOHspNjgA+2rTLbeuY
+cxiP/hG8C6Sb9iwg3yiLAA4HCnpITcbWCSelbvbYGuc3EbNy4xFyf5Cbj5DHJMID
+EkryOgyd2giIIIBOUBj8S63uGcnRpOBh9NFatfNwheKuzsPuVNldu6A9cNteNpXc
+WyJjG2axVfmq7i6SuKr1JoWYG7xTTAvKPujSl4OtsQfO3h5NepzdfXpr28oNnzfW
+ed+zclR6BcmNNo/WVfJ4xyCLSf0BCOgdTgW6PdaChd1l9VDetJZVEgC5tkyvXsfI
+SI6iyrYbKR0NEBSqq4XkadEjsCs4F1RncsS4LlgniT7GlkL9Mce3b0wGLs9/7ZIX
+dQIDAQAB
+-----END PUBLIC KEY-----"""
+
+EXPECTED_ISSUER   = "https://idp.exam.local"
+EXPECTED_AUDIENCE = "tds-pv3c9y4x.apps.exam.local"
+
+
+# Q2 — Request body model
+class TokenRequest(BaseModel):
+    token: str
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LAYER 1 — Hardcoded defaults (lowest priority)
@@ -206,11 +230,48 @@ async def effective_config(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Q2 — JWT VERIFICATION ENDPOINT
+# POST /verify  — validates RS256 JWTs and returns claims or 401
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/verify")
+async def verify_token(body: TokenRequest):
+    """
+    Q2: Accepts a JWT and verifies it using the RS256 public key.
+    Returns 200 + claims if valid, 401 if anything fails.
+    """
+    try:
+        payload = jwt.decode(
+            body.token,
+            PUBLIC_KEY,
+            algorithms=["RS256"],
+            issuer=EXPECTED_ISSUER,
+            audience=EXPECTED_AUDIENCE,
+            options={
+                "verify_signature": True,
+                "verify_exp": True,
+                "verify_iss": True,
+                "verify_aud": True,
+            },
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "valid": True,
+                "email": payload.get("email", ""),
+                "sub":   payload.get("sub", ""),
+                "aud":   payload.get("aud", ""),
+            },
+        )
+    except PyJWTError:
+        return JSONResponse(status_code=401, content={"valid": False})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health check (optional, useful for debugging on Render)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "12-Factor Config Service"}
+    return {"status": "ok", "service": "TDS GA-2 Service (Q2 + Q3)"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
