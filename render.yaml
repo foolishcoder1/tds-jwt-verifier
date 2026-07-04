@@ -1,0 +1,10 @@
+# Render.com deployment configuration
+# This tells Render how to run our FastAPI service
+
+services:
+  - type: web
+    name: tds-jwt-verifier
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    plan: free
