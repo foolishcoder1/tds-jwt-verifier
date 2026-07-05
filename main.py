@@ -66,7 +66,7 @@ class TokenRequest(BaseModel):
 ANALYTICS_API_KEY = "ak_a8c840l49bohshnhu7co4z9o"
 
 # ELI15: Your registered email for this course — returned in every response.
-STUDENT_EMAIL = "23f1001718@ds.study.iitm.ac.in"
+STUDENT_EMAIL = "23f2004185@ds.study.iitm.ac.in"
 
 
 # Q5 — Pydantic models for the request body
