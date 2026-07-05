@@ -596,6 +596,7 @@ def extract_invoice_fields(text: str) -> dict:
 
 
 @app.post("/extract", response_model=InvoiceResponse)
+@app.post("/orders", response_model=InvoiceResponse)
 async def extract_invoice(body: InvoiceRequest):
     """
     Q8: Accepts free-form invoice text and returns structured JSON.
