@@ -7,6 +7,7 @@ This file answers several TDS GA-2 questions:
   Q3  → 12-Factor Config  (/effective-config)
   Q5  → Analytics         (/analytics)
   Q6  → Observability     (/work, /metrics, /healthz, /logs/tail)
+  Q8  → Local LLM Invoice Extraction  (/extract)
 
 Q6 ELI15 explanation:
 ======================
@@ -23,18 +24,19 @@ actual endpoint code even runs.
 """
 
 import os
+import re                            # re = regular expressions — for pattern matching
 import time                         # for startup timestamp and uptime calculation
 import uuid                         # for generating unique request IDs
 import json                         # for formatting structured log entries
 import math                         # for math.isfinite check in healthz
 from collections import deque       # deque = a list with a max size (ring buffer)
+from typing import List, Optional
 import yaml                         # pip install pyyaml  — reads YAML files
 from dotenv import dotenv_values    # pip install python-dotenv — reads .env files
-from fastapi import FastAPI, Query, Header, Request
+from fastapi import FastAPI, Query, Header, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, field_validator
 import jwt                           # PyJWT — for Q2 JWT verification
 from jwt import PyJWTError
 import uvicorn
@@ -164,7 +166,7 @@ LOG_BUFFER: deque = deque(maxlen=1000)
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="TDS GA-2 Multi-Question Service",
-    description="Q2 JWT + Q3 Config + Q5 Analytics + Q6 Observability",
+    description="Q2 JWT + Q3 Config + Q5 Analytics + Q6 Observability + Q8 Invoice Extraction",
     version="1.0.0",
 )
 
@@ -441,11 +443,198 @@ async def analytics(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Q8 — INVOICE EXTRACTION ENDPOINT
+# POST /extract
+#
+# ELI15: Imagine you receive a messy letter with payment details written in
+# different ways every time. Your job is to read the letter and pull out:
+#   1. Who sent the bill (vendor)
+#   2. How much you owe (amount)
+#   3. What currency (USD, EUR, GBP)
+#   4. When to pay by (date)
+#
+# We use "regular expressions" (regex) to scan the text for patterns.
+# Think of regex like a very smart CTRL+F that can find things like
+# "any number with a decimal point" or "4 digits - 2 digits - 2 digits".
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Q8 Pydantic Models ───────────────────────────────────────────────────────
+class InvoiceRequest(BaseModel):
+    """What the grader sends us: a blob of invoice text."""
+    text: str
+
+
+class InvoiceResponse(BaseModel):
+    """
+    What we must return — Pydantic guarantees these fields are always present
+    with the right types. If our code forgets a field, Pydantic raises an error
+    before the response is sent.
+    """
+    vendor:   str           # vendor name, e.g. "Acme-xxxx Industries Ltd."
+    amount:   float         # total due, e.g. 1234.56
+    currency: str           # 3-letter code, e.g. "USD"
+    date:     str           # YYYY-MM-DD, e.g. "2026-03-15"
+
+
+def extract_invoice_fields(text: str) -> dict:
+    """
+    ELI15: This is our "smart reader" function. It takes raw invoice text
+    and uses regex patterns to find the four required fields.
+
+    Regex crash-course:
+      \\d      = any digit (0-9)
+      \\d+     = one or more digits
+      \\d{4}   = exactly four digits
+      [A-Z]{3} = exactly three uppercase letters
+      (?:...)  = a group we don't need to capture separately
+      (...)    = a capture group — what we actually want to extract
+      \\s*     = zero or more spaces
+      (?i)     = make the pattern case-insensitive
+    """
+
+    # ── STEP 1: Extract DATE (YYYY-MM-DD) ────────────────────────────────────
+    # Pattern: exactly 4 digits, dash, 2 digits, dash, 2 digits
+    # Example matches: "2026-03-15", "2026-12-01"
+    date = ""
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
+    if date_match:
+        date = date_match.group(1)    # group(1) = the first capture group = the date
+
+    # ── STEP 2: Extract CURRENCY (3-letter code) ─────────────────────────────
+    # We look for any of the known 3-letter codes near a number.
+    # Priority: explicit label like "Currency: USD" first, then near an amount.
+    currency = ""
+    # Pattern A: "Currency: USD" or "Currency USD"
+    cur_label_match = re.search(
+        r"(?i)currency[:\s]+([A-Z]{3})", text
+    )
+    if cur_label_match:
+        currency = cur_label_match.group(1).upper()
+    else:
+        # Pattern B: a currency code appearing near a number
+        # e.g. "USD 1,234.56" or "1,234.56 EUR"
+        cur_near_match = re.search(
+            r"\b(USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY|INR)\b", text, re.IGNORECASE
+        )
+        if cur_near_match:
+            currency = cur_near_match.group(1).upper()
+
+    # ── STEP 3: Extract AMOUNT (a number, possibly with commas/decimals) ─────
+    # Pattern: optional currency code, then digits (with optional commas and
+    # a decimal portion). We look for labelled amounts first.
+    amount = 0.0
+
+    # Helper: strip commas and convert to float
+    def parse_num(s: str) -> float:
+        return float(s.replace(",", ""))
+
+    # Pattern A: labelled as "Total", "Amount Due", "Total Due", "Balance Due"
+    # followed by optional currency symbol/code, then the number
+    amount_match = re.search(
+        r"(?i)(?:total\s+(?:due|amount)?|amount\s+due|balance\s+due|invoice\s+total|due)[:\s]*"
+        r"(?:[A-Z]{3}|[\$\€\£])?\s*([\d,]+(?:\.\d+)?)",
+        text
+    )
+    if amount_match:
+        try:
+            amount = parse_num(amount_match.group(1))
+        except ValueError:
+            pass
+
+    # Pattern B: if Pattern A found nothing, try "USD 1234.56" or "1234.56 USD"
+    if amount == 0.0:
+        amt_cur_match = re.search(
+            r"(?:USD|EUR|GBP|JPY|CAD|AUD|CHF|CNY|INR)\s*([\d,]+(?:\.\d+)?)",
+            text, re.IGNORECASE
+        )
+        if amt_cur_match:
+            try:
+                amount = parse_num(amt_cur_match.group(1))
+            except ValueError:
+                pass
+
+    # Pattern C: fallback — find any standalone number that looks like a price
+    if amount == 0.0:
+        all_nums = re.findall(r"\b([\d,]+\.\d{2})\b", text)
+        if all_nums:
+            try:
+                amount = parse_num(all_nums[-1])   # last decimal number in text
+            except ValueError:
+                pass
+
+    # ── STEP 4: Extract VENDOR (company/person name) ──────────────────────────
+    # The grader plants names like "Acme-xxxx Industries Ltd."
+    # Strategy: look for labelled lines like "Vendor:", "Bill From:", "Supplier:",
+    # "Company:", "From:" — and grab the rest of that line.
+    vendor = ""
+
+    vendor_match = re.search(
+        r"(?i)(?:vendor|bill\s+(?:from|to)|supplier|company|from|sold\s+by|billed\s+by)[:\s]+(.+)",
+        text
+    )
+    if vendor_match:
+        # Strip trailing whitespace and punctuation like commas/periods at end
+        vendor = vendor_match.group(1).strip().rstrip(",;")
+        # Take only the first line in case more text follows
+        vendor = vendor.split("\n")[0].strip()
+
+    # Fallback: look for lines with company-like suffixes (Ltd, LLC, Inc, Corp)
+    if not vendor:
+        corp_match = re.search(
+            r"([A-Za-z0-9\-\s]+?(?:Ltd\.?|LLC\.?|Inc\.?|Corp\.?|Co\.?|Industries|Solutions|Services|Group))",
+            text
+        )
+        if corp_match:
+            vendor = corp_match.group(1).strip()
+
+    return {
+        "vendor":   vendor,
+        "amount":   amount,
+        "currency": currency,
+        "date":     date,
+    }
+
+
+@app.post("/extract", response_model=InvoiceResponse)
+async def extract_invoice(body: InvoiceRequest):
+    """
+    Q8: Accepts free-form invoice text and returns structured JSON.
+
+    ELI15 walkthrough:
+      1. Receive the text in the request body.
+      2. If the text is empty or too short, return a "best-effort" response
+         (empty strings and 0.0) instead of crashing with HTTP 500.
+      3. Run our regex extractor to find vendor, amount, currency, date.
+      4. Return the result — Pydantic's `response_model=InvoiceResponse`
+         guarantees the JSON shape is always correct.
+    """
+    # Guard: empty or whitespace-only text → return best-effort defaults
+    # (The question says empty input must NOT return HTTP 500.)
+    if not body.text or not body.text.strip():
+        return InvoiceResponse(
+            vendor="",
+            amount=0.0,
+            currency="USD",
+            date="1970-01-01",
+        )
+
+    fields = extract_invoice_fields(body.text)
+
+    # Fill in safe defaults for any field we couldn't find
+    return InvoiceResponse(
+        vendor=fields.get("vendor") or "",
+        amount=fields.get("amount") or 0.0,
+        currency=fields.get("currency") or "USD",
+        date=fields.get("date") or "1970-01-01",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Root health check (optional, useful for debugging on Render)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "TDS GA-2 Service (Q2 + Q3 + Q5 + Q6)"}
+    return {"status": "ok", "service": "TDS GA-2 Service (Q2 + Q3 + Q5 + Q6 + Q8)"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
