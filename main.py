@@ -180,6 +180,7 @@ app.add_middleware(
     allow_origins=["*"],      # ← allow any website to call us
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
