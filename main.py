@@ -26,7 +26,7 @@ Steps this code takes when a request comes in:
 import os
 import yaml                        # pip install pyyaml  — reads YAML files
 from dotenv import dotenv_values   # pip install python-dotenv — reads .env files
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -55,6 +55,30 @@ EXPECTED_AUDIENCE = "tds-pv3c9y4x.apps.exam.local"
 # Q2 — Request body model
 class TokenRequest(BaseModel):
     token: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q5 — ANALYTICS ENDPOINT CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ELI15: This is like a secret password the grader must say to use our endpoint.
+# We check the incoming header "X-API-Key" against this value.
+ANALYTICS_API_KEY = "ak_a8c840l49bohshnhu7co4z9o"
+
+# ELI15: Your registered email for this course — returned in every response.
+STUDENT_EMAIL = "23f1001718@ds.study.iitm.ac.in"
+
+
+# Q5 — Pydantic models for the request body
+# ELI15: Pydantic is like a "shape checker". It makes sure the incoming
+# JSON has exactly the fields we expect, with the right types.
+class AnalyticsEvent(BaseModel):
+    user: str          # e.g. "alice"
+    amount: float      # e.g. 42.5  (can be negative or zero — we handle that)
+    ts: int            # Unix timestamp, e.g. 1700000000 — we don't use this but must accept it
+
+class AnalyticsRequest(BaseModel):
+    events: List[AnalyticsEvent]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LAYER 1 — Hardcoded defaults (lowest priority)
@@ -267,11 +291,96 @@ async def verify_token(body: TokenRequest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Q5 — ANALYTICS ENDPOINT
+# POST /analytics
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/analytics")
+async def analytics(
+    body: AnalyticsRequest,
+    x_api_key: Optional[str] = Header(default=None),
+    # ELI15: FastAPI reads the "X-Api-Key" header automatically.
+    # The param name x_api_key maps to the HTTP header "X-API-Key"
+    # (FastAPI converts underscores ↔ hyphens and is case-insensitive).
+):
+    """
+    Q5: Authenticates via X-API-Key header, then aggregates event data.
+
+    ELI15 walkthrough:
+      1. Check if the header is present and matches our secret key.
+         If not → return 401 (Unauthorized).
+      2. Count all events → total_events
+      3. Collect unique user names → unique_users
+      4. Sum up amounts > 0 only → revenue
+      5. Find which user has the highest positive-amount total → top_user
+      6. Return everything as JSON.
+    """
+
+    # ── STEP 1: API Key Authentication ───────────────────────────────────────
+    # ELI15: Like checking a wristband at an event.
+    # If no wristband (None) OR wrong wristband → send them away (401).
+    if x_api_key != ANALYTICS_API_KEY:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Unauthorized: missing or invalid API key"}
+        )
+
+    # ── STEP 2: total_events ─────────────────────────────────────────────────
+    # ELI15: Just count how many items are in the events list.
+    total_events = len(body.events)
+
+    # ── STEP 3: unique_users ─────────────────────────────────────────────────
+    # ELI15: Put all user names into a "set" (a set automatically
+    # removes duplicates, like a bag that rejects duplicates).
+    # Then count how many are in the set.
+    all_users = set(event.user for event in body.events)
+    unique_users = len(all_users)
+
+    # ── STEP 4: revenue ──────────────────────────────────────────────────────
+    # ELI15: Add up all amounts BUT only if amount > 0.
+    # Zero and negative amounts are ignored (like refunds or errors).
+    revenue = sum(event.amount for event in body.events if event.amount > 0)
+
+    # ── STEP 5: top_user ─────────────────────────────────────────────────────
+    # ELI15: For each user, add up all their POSITIVE amounts.
+    # Then find which user's total is the biggest.
+    #
+    # Example:
+    #   alice:  42.5 + 10.0 = 52.5
+    #   bob:   -5.0 (negative, ignored) + 100.0 = 100.0
+    #   charlie: 30.0
+    # → top_user = "bob" (100.0 is highest)
+    user_revenue: dict = {}
+    for event in body.events:
+        if event.amount > 0:
+            # If user not seen before, start at 0; then add this amount
+            user_revenue[event.user] = user_revenue.get(event.user, 0.0) + event.amount
+
+    # max() with key= picks the user whose value (total revenue) is largest
+    # ELI15: Like picking the winner of a race — max() finds the fastest.
+    if user_revenue:
+        top_user = max(user_revenue, key=lambda u: user_revenue[u])
+    else:
+        top_user = ""  # edge case: no events had positive amounts
+
+    # ── STEP 6: Return JSON response ─────────────────────────────────────────
+    return JSONResponse(
+        status_code=200,
+        content={
+            "email":        STUDENT_EMAIL,
+            "total_events": total_events,
+            "unique_users": unique_users,
+            "revenue":      round(revenue, 2),   # round to 2 decimal places
+            "top_user":     top_user,
+        }
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Health check (optional, useful for debugging on Render)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "TDS GA-2 Service (Q2 + Q3)"}
+    return {"status": "ok", "service": "TDS GA-2 Service (Q2 + Q3 + Q5)"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
