@@ -33,7 +33,7 @@ from collections import deque       # deque = a list with a max size (ring buffe
 from typing import List, Optional
 import yaml                         # pip install pyyaml  — reads YAML files
 from dotenv import dotenv_values    # pip install python-dotenv — reads .env files
-from fastapi import FastAPI, Query, Header, Request, HTTPException
+from fastapi import FastAPI, Query, Header, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, field_validator
@@ -729,6 +729,102 @@ async def logs_tail(limit: int = Query(default=20, ge=1, le=1000, alias="limit")
     tail = all_logs[-limit:] if len(all_logs) >= limit else all_logs
     return JSONResponse(content=tail)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Q9: API Engineering (Idempotency, Pagination, Rate Limiting)
+# ─────────────────────────────────────────────────────────────────────────────
+import base64
+import uuid
+
+# Assigned values
+TOTAL_ORDERS = 41
+RATE_LIMIT_REQUESTS = 18
+RATE_LIMIT_WINDOW_SEC = 10
+
+# State stores (in-memory for assignment)
+idempotency_store = {}
+client_requests = {} # dict mapping client_id to list of timestamps
+fixed_catalog = [{"id": i} for i in range(1, TOTAL_ORDERS + 1)]
+
+def check_rate_limit(x_client_id: str = Header(..., alias="X-Client-Id")):
+    now = time.time()
+    
+    # Initialize if new client
+    if x_client_id not in client_requests:
+        client_requests[x_client_id] = []
+        
+    # Filter out requests older than the window
+    window_start = now - RATE_LIMIT_WINDOW_SEC
+    valid_requests = [req_time for req_time in client_requests[x_client_id] if req_time > window_start]
+    client_requests[x_client_id] = valid_requests
+    
+    # Check if limit exceeded
+    if len(valid_requests) >= RATE_LIMIT_REQUESTS:
+        # Calculate retry after based on the oldest request in the window
+        oldest_request = valid_requests[0]
+        retry_after = max(1, int(oldest_request + RATE_LIMIT_WINDOW_SEC - now + 1))
+        
+        raise HTTPException(
+            status_code=429,
+            detail="Too Many Requests",
+            headers={"Retry-After": str(retry_after)}
+        )
+        
+    # Add current request
+    client_requests[x_client_id].append(now)
+    return x_client_id
+
+@app.post("/orders", status_code=201)
+def create_order(
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    client_id: str = Depends(check_rate_limit)
+):
+    """
+    Idempotent Order Creation.
+    If the same key is passed, the same order ID is returned.
+    """
+    if idempotency_key in idempotency_store:
+        return {"id": idempotency_store[idempotency_key]}
+    
+    # Create new order (just generate a random UUID for demo)
+    new_order_id = str(uuid.uuid4())
+    idempotency_store[idempotency_key] = new_order_id
+    
+    return {"id": new_order_id}
+
+@app.get("/orders")
+def get_orders(
+    limit: int = 10,
+    cursor: str = None,
+    client_id: str = Depends(check_rate_limit)
+):
+    """
+    Cursor-based pagination of a fixed catalog of orders.
+    """
+    start_idx = 0
+    if cursor:
+        try:
+            # Our cursor is just the base64 encoded string of the next index
+            decoded_str = base64.b64decode(cursor.encode()).decode()
+            start_idx = int(decoded_str)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+            
+    # Calculate end index based on limit
+    end_idx = start_idx + limit
+    
+    # Slice the catalog
+    items = fixed_catalog[start_idx:end_idx]
+    
+    # Prepare response
+    response = {"items": items}
+    
+    # If there are more items, provide a next_cursor
+    if end_idx < TOTAL_ORDERS:
+        next_cursor_str = str(end_idx)
+        response["next_cursor"] = base64.b64encode(next_cursor_str.encode()).decode()
+        
+    return response
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Run locally for testing
