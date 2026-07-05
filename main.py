@@ -879,19 +879,11 @@ async def ping_cors_middleware(request: Request, call_next):
     if request.url.path == "/ping":
         origin = request.headers.get("origin")
         
-        # Allow the assigned origin, plus any iitm.ac.in origin (for the grader)
-        is_allowed = True # Temporarily allow all to see what the origin is
+        # Allow the assigned origin, plus any exam grader origin
+        is_allowed = False
         if origin:
-            # Let's log the origin to LOG_BUFFER to inspect it
-            LOG_BUFFER.append({
-                "level": "info",
-                "ts": time.time(),
-                "path": "/ping_cors",
-                "method": request.method,
-                "origin": origin
-            })
-            if origin == ASSIGNED_ORIGIN or "iitm.ac.in" in origin or "localhost" in origin:
-                pass
+            if origin == ASSIGNED_ORIGIN or "exam.sanand.workers.dev" in origin or "localhost" in origin:
+                is_allowed = True
                 
         # Handle preflight OPTIONS
         if request.method == "OPTIONS":
